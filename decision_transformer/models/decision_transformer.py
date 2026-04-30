@@ -166,6 +166,9 @@ class DecisionTransformer(TrajectoryModel):
         self.embed_state = torch.nn.Linear(self.state_dim, hidden_size)
         self.embed_action = torch.nn.Linear(self.act_dim, hidden_size)
 
+        #ドロップステップを埋め込む
+        self.embed_dropstep = nn.Embedding(max_ep_len, hidden_size)
+
         self.embed_ln = nn.LayerNorm(hidden_size)
 
         self.predict_state = torch.nn.Linear(hidden_size, self.state_dim)
@@ -203,6 +206,7 @@ class DecisionTransformer(TrajectoryModel):
         returns_to_go,
         timesteps,
         ordering,
+        dropstep,
         padding_mask=None,
     ):
 
@@ -222,9 +226,14 @@ class DecisionTransformer(TrajectoryModel):
         else:
             order_embeddings = 0.0
 
+        dropstep_embeddings = self.embed_dropstep(dropstep)
+
         state_embeddings = state_embeddings + order_embeddings
         action_embeddings = action_embeddings + order_embeddings
         returns_embeddings = returns_embeddings + order_embeddings
+
+        state_embeddings += dropstep_embeddings
+        returns_embeddings += dropstep_embeddings
 
         # this makes the sequence look like (R_1, s_1, a_1, R_2, s_2, a_2, ...)
         # which works nice in an autoregressive sense since states predict actions
@@ -266,7 +275,7 @@ class DecisionTransformer(TrajectoryModel):
         return state_preds, action_preds, return_preds
 
     def get_predictions(
-        self, states, actions, rewards, returns_to_go, timesteps, num_envs=1, **kwargs
+        self, states, actions, rewards, returns_to_go, timesteps, dropstep, num_envs=1, **kwargs
     ):
         # we don't care about the past rewards in this model
         # tensor shape: batch_size, seq_length, variable_dim
@@ -284,6 +293,7 @@ class DecisionTransformer(TrajectoryModel):
             actions = actions[:, -self.eval_context_length :]
             returns_to_go = returns_to_go[:, -self.eval_context_length :]
             timesteps = timesteps[:, -self.eval_context_length :]
+            dropstep = dropstep[:, -self.eval_context_length :]
 
             ordering = torch.tile(
                 torch.arange(timesteps.shape[1], device=states.device),
@@ -365,6 +375,17 @@ class DecisionTransformer(TrajectoryModel):
                 ],
                 dim=1,
             ).to(dtype=torch.long)
+
+            dropstep = torch.cat(
+                [
+                    torch.zeros(
+                        (dropstep.shape[0], self.max_length - dropstep.shape[1]),
+                        device=dropstep.device,
+                    ),
+                    dropstep,
+                ],
+                dim=1,
+            ).to(dtype=torch.long)
         else:
             padding_mask = None
 
@@ -375,6 +396,7 @@ class DecisionTransformer(TrajectoryModel):
             returns_to_go,
             timesteps,
             ordering,
+            dropstep,
             padding_mask=padding_mask,
             **kwargs
         )
@@ -389,3 +411,12 @@ class DecisionTransformer(TrajectoryModel):
 
     def clamp_action(self, action):
         return action.clamp(*self.action_range)
+
+    def freeze_trunk(self):
+        freezed_models = [
+        self.embed_timestep,self.embed_return,self.embed_state,self.embed_action,self.embed_ln,self.transformer
+        ]
+        for model in freezed_models:
+            for p in model.parameters():
+                p.requires_grad = False
+                p.grad = None

@@ -63,6 +63,7 @@ def vec_evaluate_episode_rtg(
     device="cuda",
     mode="normal",
     use_mean=False,
+    drop_p = 0.0,
 ):
     assert len(target_return) == vec_env.num_envs
 
@@ -92,12 +93,19 @@ def vec_evaluate_episode_rtg(
     timesteps = torch.tensor([0] * num_envs, device=device, dtype=torch.long).reshape(
         num_envs, -1
     )
+    dropsteps = torch.tensor([0] * num_envs, device=device, dtype=torch.long).reshape(
+        num_envs, -1
+    )
 
     # episode_return, episode_length = 0.0, 0
     episode_return = np.zeros((num_envs, 1)).astype(float)
     episode_length = np.full(num_envs, np.inf)
 
     unfinished = np.ones(num_envs).astype(bool)
+
+    last_state = None
+    last_reward = None
+
     for t in range(max_ep_len):
         # add padding
         actions = torch.cat(
@@ -123,6 +131,7 @@ def vec_evaluate_episode_rtg(
             rewards.to(dtype=torch.float32),
             target_return.to(dtype=torch.float32),
             timesteps.to(dtype=torch.long),
+            dropsteps,
             num_envs=num_envs,
         )
         state_pred = state_pred.detach().cpu().numpy().reshape(num_envs, -1)
@@ -141,6 +150,36 @@ def vec_evaluate_episode_rtg(
         # "unfinished" to track whether the first episode we roll out for each sub-env is
         # finished. In contrast, "done" only relates to the current episode
         episode_return[unfinished] += reward[unfinished].reshape(-1, 1)
+
+        #ここでdrop_pが0より大きかったときだけ、欠落率の処理を行う
+        if drop_p > 0:
+            if last_state is None:
+                last_state = state
+                last_reward = reward
+            if(np.random.random() > drop_p):
+                last_state = state
+                last_reward = reward
+                #ここでドロップステップを0にしてテンソルの最後に追加
+                dropsteps = torch.cat(
+                    [
+                        dropsteps,
+                        torch.zeros((num_envs,1),device=device,dtype=torch.long).reshape(
+                            num_envs,1
+                        ),
+                        ],dim=1
+                )
+            else:
+                state = last_state
+                reward = last_reward
+                dropsteps = torch.cat(
+                    [
+                        dropsteps,
+                        torch.ones((num_envs,1),device=device,dtype=torch.long).reshape(
+                            num_envs,1
+                        )*(dropsteps[0][-1]+1),
+                        ],dim=1
+                )
+                #ここでドロップステップの最後尾を1増加させたものをテンソルの最後に追加
 
         actions[:, -1] = action
         state = (

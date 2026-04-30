@@ -26,7 +26,14 @@ from evaluation import create_vec_eval_episodes_fn, vec_evaluate_episode_rtg
 from trainer import SequenceTrainer
 from logger import Logger
 
+import csv
+import pprint
+import copy
+from datetime import datetime
+
 MAX_EPISODE_LEN = 1000
+FREEZE_TRUNK_FINETUNING_LEN = 120000
+PARAM_SPAN = 10000
 
 
 class Experiment:
@@ -80,6 +87,11 @@ class Experiment:
             betas=[0.9, 0.999],
         )
 
+        self.lr_save = variant["learning_rate"]
+        self.weight_decay_save = variant["weight_decay"]
+        self.warmup_save = variant["warmup_steps"]
+        self.seed = variant["seed"]
+
         # track the training progress and
         # training/evaluation/online performance in all the iterations
         self.pretrain_iter = 0
@@ -129,6 +141,15 @@ class Experiment:
             with open(f"{path_prefix}/model.pt", "rb") as f:
                 checkpoint = torch.load(f)
             self.model.load_state_dict(checkpoint["model_state_dict"])
+            
+            self.model.freeze_trunk()
+            self.optimizer = Lamb(
+                    filter(lambda p: p.requires_grad, self.model.parameters()),
+                    lr=self.lr_save,
+                    weight_decay=self.weight_decay_save,
+                    eps=1e-8,
+                )
+            
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             self.log_temperature_optimizer.load_state_dict(
@@ -243,6 +264,7 @@ class Experiment:
             log_temperature_optimizer=self.log_temperature_optimizer,
             scheduler=self.scheduler,
             device=self.device,
+            drop_p=self.variant["drop_p"]
         )
 
         writer = (
@@ -307,6 +329,7 @@ class Experiment:
             log_temperature_optimizer=self.log_temperature_optimizer,
             scheduler=self.scheduler,
             device=self.device,
+            drop_p=self.variant["drop_p"]
         )
         eval_fns = [
             create_vec_eval_episodes_fn(
@@ -324,6 +347,8 @@ class Experiment:
         writer = (
             SummaryWriter(self.logger.log_path) if self.variant["log_to_tb"] else None
         )
+        with open('param.txt',mode='w') as f:
+            pass
         while self.online_iter < self.variant["max_online_iters"]:
 
             outputs = {}
@@ -356,6 +381,22 @@ class Experiment:
             else:
                 evaluation = False
 
+            if self.online_iter == self.variant["freeze_trunk_ft_time"] :
+                scheduler_state = self.scheduler.state_dict()
+                self.model.freeze_trunk()
+                trainer.set_drop_p(self.variant["drop_pf"])
+                self.optimizer = Lamb(
+                    filter(lambda p: p.requires_grad, self.model.parameters()),
+                    lr=self.lr_save,
+                    weight_decay=self.weight_decay_save,
+                    eps=1e-8,
+                )
+                warmup = self.warmup_save
+                self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+                    self.optimizer, lambda steps: min((steps + 1) / warmup , 1)
+                )
+                self.scheduler.load_state_dict(scheduler_state)
+                
             train_outputs = trainer.train_iteration(
                 loss_fn=loss_fn,
                 dataloader=dataloader,
@@ -459,59 +500,98 @@ class Experiment:
             )
             self.online_tuning(online_envs, eval_envs, loss_fn)
             online_envs.close()
-
+        
+        # Evaluate each frame drop rate
+        drop_list=[]
+        for t in range(10):
+            returns,_,_ = vec_evaluate_episode_rtg(
+                eval_envs,
+                self.state_dim,
+                self.act_dim,
+                self.model,
+                max_ep_len=1000,
+                reward_scale=self.reward_scale,
+                target_return=[self.variant["eval_rtg"] * self.reward_scale] * eval_envs.num_envs,
+                mode="normal",
+                state_mean=self.state_mean,
+                state_std=self.state_std,
+                device=self.device,
+                use_mean=True,
+                drop_p = t * 0.1,
+            )
+            dp = format(t*0.1,'.1f')
+            q75,q25 = np.percentile(returns,[75,25])
+            print('drop_p =',dp,'return_mean',np.mean(returns),' return_std',np.std(returns),' 75%',q75,' 25%',q25)
+            #droplist.append([dp,np.mean(returns),np.std(returns),q75,q25])
+            drop_list.append(returns)
+            now = datetime.now().strftime("%Y%m%d%H%M%S")
+            
+        with open(str(self.seed)+'result.csv','w') as f:
+            writer = csv.writer(f)
+            for row in drop_list:
+                writer.writerow(row)
         eval_envs.close()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--seed", type=int, default=10)
-    parser.add_argument("--env", type=str, default="hopper-medium-v2")
+    seed = 10
+    for times in range(5):
+        parser = argparse.ArgumentParser()
+        # frame dropping options
+        parser.add_argument("--drop_p", type=float, default=0.8)
+        parser.add_argument("--drop_pf", type=float, default=0.8)
+        parser.add_argument("--freeze_trunk_ft_time", type=int, default=1200)  # not used in this code but kept for compatibility
+        
+        # shared options
+        parser.add_argument("--seed", type=int, default=seed)
+        parser.add_argument("--env", type=str, default="halfcheetah-random-v2")
 
-    # model options
-    parser.add_argument("--K", type=int, default=20)
-    parser.add_argument("--embed_dim", type=int, default=512)
-    parser.add_argument("--n_layer", type=int, default=4)
-    parser.add_argument("--n_head", type=int, default=4)
-    parser.add_argument("--activation_function", type=str, default="relu")
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--eval_context_length", type=int, default=5)
-    # 0: no pos embedding others: absolute ordering
-    parser.add_argument("--ordering", type=int, default=0)
+        # model options
+        parser.add_argument("--K", type=int, default=20)
+        parser.add_argument("--embed_dim", type=int, default=512)
+        parser.add_argument("--n_layer", type=int, default=4)
+        parser.add_argument("--n_head", type=int, default=4)
+        parser.add_argument("--activation_function", type=str, default="relu")
+        parser.add_argument("--dropout", type=float, default=0.1)
+        parser.add_argument("--eval_context_length", type=int, default=5)
+        # 0: no pos embedding others: absolute ordering
+        parser.add_argument("--ordering", type=int, default=0)
 
-    # shared evaluation options
-    parser.add_argument("--eval_rtg", type=int, default=3600)
-    parser.add_argument("--num_eval_episodes", type=int, default=10)
+        # shared evaluation options
+        parser.add_argument("--eval_rtg", type=int, default=6000)
+        parser.add_argument("--num_eval_episodes", type=int, default=100)
 
-    # shared training options
-    parser.add_argument("--init_temperature", type=float, default=0.1)
-    parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--learning_rate", "-lr", type=float, default=1e-4)
-    parser.add_argument("--weight_decay", "-wd", type=float, default=5e-4)
-    parser.add_argument("--warmup_steps", type=int, default=10000)
+        # shared training options
+        parser.add_argument("--init_temperature", type=float, default=0.1)
+        parser.add_argument("--batch_size", type=int, default=256)
+        parser.add_argument("--learning_rate", "-lr", type=float, default=1e-4)
+        parser.add_argument("--weight_decay", "-wd", type=float, default=5e-4)
+        parser.add_argument("--warmup_steps", type=int, default=10000)
 
-    # pretraining options
-    parser.add_argument("--max_pretrain_iters", type=int, default=1)
-    parser.add_argument("--num_updates_per_pretrain_iter", type=int, default=5000)
+        # pretraining options
+        parser.add_argument("--max_pretrain_iters", type=int, default=1)
+        parser.add_argument("--num_updates_per_pretrain_iter", type=int, default=5000)
 
-    # finetuning options
-    parser.add_argument("--max_online_iters", type=int, default=1500)
-    parser.add_argument("--online_rtg", type=int, default=7200)
-    parser.add_argument("--num_online_rollouts", type=int, default=1)
-    parser.add_argument("--replay_size", type=int, default=1000)
-    parser.add_argument("--num_updates_per_online_iter", type=int, default=300)
-    parser.add_argument("--eval_interval", type=int, default=10)
+        # finetuning options
+        parser.add_argument("--max_online_iters", type=int, default=1500)
+        #注意！
+        parser.add_argument("--online_rtg", type=int, default=12000)
+        parser.add_argument("--num_online_rollouts", type=int, default=1)
+        parser.add_argument("--replay_size", type=int, default=1000)
+        parser.add_argument("--num_updates_per_online_iter", type=int, default=300)
+        parser.add_argument("--eval_interval", type=int, default=100)
 
-    # environment options
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--log_to_tb", "-w", type=bool, default=True)
-    parser.add_argument("--save_dir", type=str, default="./exp")
-    parser.add_argument("--exp_name", type=str, default="default")
+        # environment options
+        parser.add_argument("--device", type=str, default="cuda:1")
+        parser.add_argument("--log_to_tb", "-w", type=bool, default=True)
+        parser.add_argument("--save_dir", type=str, default="./exp")
+        parser.add_argument("--exp_name", type=str, default="default")
 
-    args = parser.parse_args()
+        args = parser.parse_args()
 
-    utils.set_seed_everywhere(args.seed)
-    experiment = Experiment(vars(args))
+        utils.set_seed_everywhere(args.seed)
+        experiment = Experiment(vars(args))
 
-    print("=" * 50)
-    experiment()
+        print("=" * 50)
+        experiment()
+        seed = seed + 1

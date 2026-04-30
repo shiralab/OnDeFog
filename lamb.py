@@ -110,7 +110,7 @@ class Lamb(Optimizer):
         global_grad_norm = torch.zeros(1, device=device)
         for group in self.param_groups:
             for p in group['params']:
-                if p.grad is None:
+                if not p.requires_grad or p.grad is None:
                     continue
                 grad = p.grad
                 if grad.is_sparse:

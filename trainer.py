@@ -18,6 +18,7 @@ class SequenceTrainer:
         log_temperature_optimizer,
         scheduler=None,
         device="cuda",
+        drop_p = 0.0
     ):
         self.model = model
         self.optimizer = optimizer
@@ -25,6 +26,7 @@ class SequenceTrainer:
         self.scheduler = scheduler
         self.device = device
         self.start_time = time.time()
+        self.drop_p = drop_p
 
     def train_iteration(
         self,
@@ -74,6 +76,17 @@ class SequenceTrainer:
         padding_mask = padding_mask.to(self.device)
 
         action_target = torch.clone(actions)
+        dropstep = torch.zeros_like(timesteps)
+
+        # Frames are lost due to the frame drop rate.
+        _,max_len = timesteps.shape
+        dropstep = torch.zeros_like(timesteps)
+        mask = ((padding_mask[:, :-1] == 1) & (np.random.random()<=self.drop_p)).to(timesteps.device)
+        for t in range(1, max_len):
+            dropstep[:, t][mask[:,t-1]] = dropstep[:, t-1][mask[:,t-1]]+1
+            rewards[:, t, 0][mask[:,t-1]] = rewards[:, t-1, 0][mask[:,t-1]]
+            rtg[:, t, 0][mask[:,t-1]] = rtg[:, t-1, 0][mask[:,t-1]]
+            states[:, t][mask[:,t-1]] = states[:, t-1][mask[:,t-1]]
 
         _, action_preds, _ = self.model.forward(
             states,
@@ -82,6 +95,7 @@ class SequenceTrainer:
             rtg[:, :-1],
             timesteps,
             ordering,
+            dropstep,
             padding_mask=padding_mask,
         )
 
@@ -111,3 +125,6 @@ class SequenceTrainer:
             nll.detach().cpu().item(),
             entropy.detach().cpu().item(),
         )
+
+    def set_drop_p(self,drop_p):
+        self.drop_p = drop_p

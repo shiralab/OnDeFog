@@ -142,6 +142,7 @@ def create_dataloader(
     # total number of subt-rajectories you need to sample
     sample_size = batch_size * num_iters
     sampling_ind = sample_trajs(trajectories, sample_size)
+    #sampling_ind = sample_trajs_ordered(trajectories,sample_size)
 
     transform = TransformSamplingSubTraj(
         max_len=max_len,
@@ -179,4 +180,18 @@ def sample_trajs(trajectories, sample_size):
         replace=True,
         p=p_sample,
     )
+    return inds
+
+def sample_trajs_ordered(trajectories, sample_size):
+    # すべての軌跡インデックスを順番に並べる
+    total_trajectories = len(trajectories)
+    ordered_inds = np.arange(total_trajectories)
+
+    # サンプル数が軌跡の総数より大きい場合はサンプル数を調整
+    if sample_size > total_trajectories:
+        sample_size = total_trajectories
+
+    # 必要なサンプルサイズ分だけ順番にインデックスを取得
+    inds = ordered_inds[:sample_size]
+
     return inds

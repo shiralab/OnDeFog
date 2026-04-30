@@ -1,4 +1,4 @@
-name: odt
+name: ondefog
 channels:
   - pytorch
 dependencies:
