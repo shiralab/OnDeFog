@@ -1,5 +1,5 @@
 # OnDeFog
-This repository contains the Pytorch implementation of [OnDeFog: Online Decision Transformer Under Frame Dropping](https://arxiv.org/abs/2202.05607) by [Daiki Yotsufuji]().
+This repository contains the Pytorch implementation of [OnDeFog: Online Decision Transformer Under Frame Dropping]() by [Daiki Yotsufuji]().
 
 If you use this code for your research, please cite us as:
 ```Bibtex
